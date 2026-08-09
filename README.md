@@ -20,6 +20,13 @@ skills/<name>/
 └── scripts/          # Python helper scripts
 ```
 
+## Agent entry guides
+
+- `AGENTS.md` — Codex convention.
+- `CLAUDE.md` — Claude Code / other-agent convention (identical guidance).
+
+Both point to the skill entry and list the file map.
+
 ## License
 
 Apache License 2.0. See `LICENSE`. Individual skills may carry their own
