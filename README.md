@@ -9,7 +9,7 @@ other agents that support agent skills.
 
 | Skill | Description |
 |---|---|
-| `mcpe-native-modding` | Develop native mods and hooks for MCPE (Minecraft: Pocket Edition) Android arm64 by following the open-source BedrockTools methodology. |
+| `mcpe-native-modding` | Develop native mods and hooks for MCPE (Minecraft: Pocket Edition) Android arm64, supporting two runtimes: preloader (BedrockTools methodology) and BreezeAPI (Dobby + QuickJS). |
 
 ## Layout
 

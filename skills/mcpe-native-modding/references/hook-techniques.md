@@ -217,3 +217,191 @@ When the dictionary does not have a function:
 - Reimplementing function logic instead of calling the original → drift,
   bugs.
 - Baking in a hardcoded address → breaks on the next game version.
+
+---
+
+# Part B — BreezeAPI (Dobby-based) hooks
+
+BreezeAPI uses [Dobby](https://github.com/jmpews/Dobby) as its inline-hook
+engine. Unlike preloader's signature scanning, BreezeAPI addresses
+functions by **symbol name**, **library offset**, or **absolute address**.
+This section covers the BreezeAPI-specific hook shapes.
+
+## 11. HookBySymbol
+
+Use when the function is an exported symbol (or resolvable by Dobby's
+internal symbol resolver, which falls back past `dlsym`).
+
+```cpp
+#include <breeze_api.h>
+
+static void* (*orig_GameTick)(void*, int) = nullptr;
+void* hook_GameTick(void* self, int dt) {
+    // custom logic before
+    auto ret = orig_GameTick(self, dt);
+    // custom logic after
+    return ret;
+}
+
+void install() {
+    auto& api = breeze::BreezeAPI::Instance();
+    api.Init();
+    auto status = api.HookBySymbol(
+        "libminecraftpe.so",
+        "_ZN6Server4tickEi",      // mangled C++ symbol
+        (void*)hook_GameTick,
+        (void**)&orig_GameTick,
+        "ServerTick");
+    if (status != breeze::HookStatus::Ok && status != breeze::HookStatus::AlreadyHooked) {
+        // log: symbol not found or invalid
+    }
+}
+```
+
+Notes:
+
+- The `library` argument is matched against loaded module names.
+- The `tag` is a human-readable handle; use `GetHookInfoByTag(tag)` to
+  query later, and `Unhook(target)` (by address) or `UnhookAll()` to
+  remove.
+- `HookStatus::AlreadyHooked` is not an error; the hook is already in
+  place.
+
+## 12. HookByOffset
+
+Use for **stripped, unexported** functions where you know the offset from
+the library base (from a prior disassembly). The offset is stable across
+loads for a given game version.
+
+```cpp
+auto& api = breeze::BreezeAPI::Instance();
+api.Init();
+// offset 0x1234560 from libminecraftpe.so base; from disassembly
+api.HookByOffset(
+    "libminecraftpe.so",
+    0x1234560,
+    (void*)hook_GameTick,
+    (void**)&orig_GameTick,
+    "ServerTickByOffset");
+```
+
+This is the BreezeAPI equivalent of preloader's signature resolve + hook,
+but the "addressing" is done once at disassembly time rather than at
+runtime via pattern scan. On a new game version, re-derive the offset
+(see `version-porting.md`).
+
+## 13. HookByAddress
+
+Use when you have an absolute runtime address (e.g. from
+`ResolveSymbol` or `ResolveLibraryBase + offset`).
+
+```cpp
+auto& api = breeze::BreezeAPI::Instance();
+api.Init();
+void* base = api.ResolveLibraryBase("libminecraftpe.so");
+if (!base) { /* library not loaded yet; poll */ }
+void* target = (void*)((uintptr_t)base + 0x1234560);
+api.HookByAddress(target, (void*)hook_GameTick, (void**)&orig_GameTick, "ServerTickByAddr");
+```
+
+## 14. Waiting for the game library
+
+BreezeAPI does not hook `dlopen` by default. To wait for
+`libminecraftpe.so`:
+
+```cpp
+// poll loop (e.g. from a background thread or a timer)
+while (!api.ResolveLibraryBase("libminecraftpe.so")) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
+install();
+```
+
+Or hook `dlopen` itself via `HookBySymbol("libdl.so", "dlopen", ...)`
+and install game hooks when the name matches.
+
+## 15. Hook lifecycle and query
+
+```cpp
+// query by target address
+auto info = api.GetHookInfo(target);
+// info.has_value() -> bool, info->target, info->replace, info->tag
+
+// query by tag
+auto info2 = api.GetHookInfoByTag("ServerTick");
+
+// list all
+auto all = api.GetAllHooks();   // std::vector<HookInfo>
+
+// remove
+api.Unhook(target);             // by address
+api.UnhookAll();                // remove everything
+```
+
+Always unhook before `Shutdown()` or process exit to avoid dangling
+trampolines.
+
+## 16. Byte patches with BreezeAPI
+
+BreezeAPI does not expose a dedicated patch API; for byte patches, use
+the same safe-patch pattern as preloader, computing the address via
+`ResolveLibraryBase + offset` and applying `mprotect` + `memcpy` +
+`__builtin___clear_cache` manually:
+
+```cpp
+void* base = api.ResolveLibraryBase("libminecraftpe.so");
+uintptr_t addr = (uintptr_t)base + 0x1234560;
+uint8_t expected[4]  = {0x08, 0x00, 0x80, 0x52};  // MOV W8, #0
+uint8_t replace[4]   = {0xE9, 0x0F, 0x80, 0x52};  // MOV W9, #0x3E7
+
+uint8_t cur[4];
+std::memcpy(cur, (void*)addr, 4);
+if (std::memcmp(cur, replace, 4) == 0) return;          // already patched
+if (std::memcmp(cur, expected, 4) != 0) { /* mismatch; skip */ return; }
+
+// mprotect RW, write, clear cache, mprotect RX
+uintptr_t page = addr & ~0xFFF;
+mprotect((void*)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC);
+std::memcpy((void*)addr, replace, 4);
+__builtin___clear_cache((char*)addr, (char*)addr + 4);
+mprotect((void*)page, 0x1000, PROT_READ | PROT_EXEC);
+```
+
+For 16KB-page devices (Android 15+), align to 16384 instead of 4096.
+
+## 17. JS scripting integration
+
+BreezeAPI embeds QuickJS. Use it for runtime-configurable logic instead
+of a C++ event bus:
+
+```cpp
+// register a native callback callable from JS
+api.RegisterJSFunction("getVersion", [](const std::vector<std::string>&) {
+    return std::string("1.21.0");
+});
+
+// evaluate JS that calls it
+auto r = api.EvalJS(R"(var v = getVersion(); "Game version: " + v;)");
+if (r.success && r.type == (int)breeze::JSType::String) {
+    // r.value == "Game version: 1.21.0"
+}
+
+// load an ES module
+api.RegisterJSModule("./feature.js", R"(export function run() { ... })");
+api.EvalJSModule(R"(import { run } from './feature.js'; run();)", "main");
+```
+
+JS globals are shared across all `EvalJS` calls; use them for state.
+
+## 18. BreezeAPI pitfalls
+
+- Calling hook APIs before `Init()` → no-op or crash.
+- Using a stale offset after a game update → wrong function hooked.
+- Forgetting to `Unhook` before `Shutdown()` → dangling trampolines.
+- Assuming `dlsym` finds the symbol → MCPE is stripped; use offsets for
+  unexported functions.
+- Not aligning mprotect to the device page size (4KB vs 16KB) →
+  `mprotect` fails silently or crashes.
+- Letting JS hold references to native pointers across reloads → use
+  integer handles, not raw pointers, in the JS API surface.
+

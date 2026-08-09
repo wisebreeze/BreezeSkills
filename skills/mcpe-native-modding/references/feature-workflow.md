@@ -3,6 +3,21 @@
 The core thinking workflow. Use this **before** writing any code. Skipping
 this pipeline is the most common cause of broken mods.
 
+## Step 0 — Pick a runtime
+
+Before the pipeline, decide which runtime the mod targets. This affects
+addressing, packaging, and the hook API.
+
+| If the user targets… | Use runtime | Addressing | Packaging |
+|---|---|---|---|
+| LeviLauncher / `.levipack` / preloader SDK | preloader | byte signatures | `.levipack` |
+| A host app bundling `libbreeze_api.so` / Dobby / QuickJS | BreezeAPI | symbol / offset / address | `jniLibs/` |
+| Wants runtime JS scripting of hook logic | BreezeAPI | offset (for stripped fns) | `jniLibs/` |
+| Wants typed events (FrameEvent, TickEvent…) | preloader | signatures | `.levipack` |
+
+If the user does not specify, **ask** which launcher/SDK the mod targets
+before writing code.
+
 ## The pipeline
 
 ```

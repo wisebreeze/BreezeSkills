@@ -102,3 +102,58 @@ This makes the next port a diff against the last known-good state.
   update.
 - Shipping without a logcat smoke-test → first crash is on the user's
   device.
+
+---
+
+# Part B — BreezeAPI porting (offsets)
+
+BreezeAPI does not use byte signatures; it addresses functions by
+**symbol name** or **library offset**. Porting is therefore about
+re-deriving offsets, not re-extracting patterns.
+
+## 8. Re-derive offsets
+
+For each `HookByOffset` call in your mod:
+
+1. Open the new `.so` in a disassembler.
+2. Find the function (via string xref, same as preloader porting).
+3. Read the function's address relative to the library base.
+4. Update the offset literal in your mod source.
+5. Rebuild and smoke-test.
+
+For `HookBySymbol` calls: if the symbol was exported and remains
+exported, no change needed. If the symbol was stripped in the new
+version (rare for exports, common for internal functions you were
+reaching via a resolver), switch that hook to `HookByOffset`.
+
+## 9. Re-verify byte patches
+
+Byte patches (section 5 above) apply to both runtimes identically — the
+addressing differs (signature vs offset) but the safe-patch logic is the
+same. For BreezeAPI, compute the patch address as
+`ResolveLibraryBase("libminecraftpe.so") + offset` and re-verify
+`expected` bytes against the new binary.
+
+## 10. BreezeAPI porting checklist
+
+- [ ] Pull the new `libminecraftpe.so` and back it up.
+- [ ] For each `HookByOffset`: re-derive the offset from the new binary.
+- [ ] For each `HookBySymbol`: confirm the symbol is still exported
+      (else switch to offset).
+- [ ] For each byte patch: re-verify `expected` bytes; update if changed.
+- [ ] Rebuild `libbreeze_api.so` only if BreezeAPI itself shipped a new
+      version (its API is stable across game versions).
+- [ ] Smoke-test on device with logcat.
+- [ ] Update the porting log with new offsets.
+
+## 11. BreezeAPI porting pitfalls
+
+- Treating an offset as stable across versions → it is not; re-derive
+  every time.
+- Forgetting that `ResolveLibraryBase` returns the **load** base, which
+  may differ from the file's preferred load address → always add the
+  offset to the runtime base, never to a file offset.
+- Not re-testing byte patches after a game update → silent corruption.
+- Assuming a symbol is still exported because it was last version →
+  verify with `nm -D` or `readelf --dyn-syms`.
+
