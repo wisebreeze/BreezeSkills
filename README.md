@@ -22,5 +22,5 @@ skills/<name>/
 
 ## License
 
-GPL-3.0. See `LICENSE`. Individual skills may carry their own `NOTICE`
-file for attribution.
+Apache License 2.0. See `LICENSE`. Individual skills may carry their own
+`NOTICE` file for attribution.

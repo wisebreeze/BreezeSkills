@@ -13,7 +13,7 @@ the preloader SDK is open source at
 [LiteLDev/preloader-android](https://github.com/LiteLDev/preloader-android).
 
 The methodology follows the open-source
-[BedrockTools](https://github.com/RadiantByte/BedrockTools) project (GPL-3.0).
+[BedrockTools](https://github.com/RadiantByte/BedrockTools) project.
 See `NOTICE` for attribution.
 
 Everything here is **machine-agnostic**: replace `<libminecraftpe.so>`,

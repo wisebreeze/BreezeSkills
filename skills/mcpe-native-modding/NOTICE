@@ -1,12 +1,11 @@
 NOTICE
 
 This skill (mcpe-native-modding) teaches the methodology of the open-source
-BedrockTools project (https://github.com/RadiantByte/BedrockTools), which is
-licensed under the GNU General Public License v3.0 (GPL-3.0).
+BedrockTools project (https://github.com/RadiantByte/BedrockTools).
 
 The hook/patch/signature/build patterns described here are derived from
-BedrockTools' code and documentation. Under GPL-3.0, this skill is
-distributed under the same license (see LICENSE).
+BedrockTools' code and documentation. This skill is licensed under the
+Apache License, Version 2.0 (see the repository root LICENSE).
 
 The runtime SDK is preloader-android
 (https://github.com/LiteLDev/preloader-android) and the launcher is
