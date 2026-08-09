@@ -157,3 +157,80 @@ same. For BreezeAPI, compute the patch address as
 - Assuming a symbol is still exported because it was last version →
   verify with `nm -D` or `readelf --dyn-syms`.
 
+---
+
+# Part C — Rust porting (pattern arrays)
+
+Rust mods (mtbinloader2 pattern) keep a **per-version, per-architecture
+pattern array**. Porting means adding the new version's pattern, not
+replacing old ones — old patterns stay for backward compatibility.
+
+## 12. Add a new version's pattern
+
+1. Pull the new `libminecraftpe.so` and back it up.
+2. Open it in a disassembler; find the target function via string xref.
+3. Copy the first 16-32 bytes of the new prologue.
+4. Wildcard the low register byte of each instruction (`??`).
+5. Add a new `Pattern::from_str(...)` entry to the front of the
+   `PATTERNS` array for that architecture.
+6. Rebuild and smoke-test; the new pattern should match first.
+
+```rust
+#[cfg(target_arch = "aarch64")]
+const PATTERNS: [Pattern; 3] = [
+    // 1.21.120.4 (newest — try first)
+    Pattern::from_str("FF ?? 02 D1 FD 7B ?? A9 ..."),
+    // 1.21.60.21
+    Pattern::from_str("FF 83 02 D1 FD 7B 06 A9 ..."),
+    // 1.19.50-1.21.50
+    Pattern::from_str("FF 03 03 D1 FD 7B 07 A9 ..."),
+];
+```
+
+Order matters: newest first, so the common case matches on the first
+iteration.
+
+## 13. Cross-architecture patterns
+
+If the mod supports `armv7` and `x86_64` in addition to `aarch64`, keep a
+separate `PATTERNS` array per architecture, gated by `#[cfg(...)]`:
+
+```rust
+#[cfg(target_arch = "aarch64")]
+const PATTERNS: [Pattern; N] = [ /* aarch64 patterns */ ];
+
+#[cfg(target_arch = "arm")]
+const PATTERNS: [Pattern; M] = [ /* arm patterns */ ];
+
+#[cfg(target_arch = "x86_64")]
+const PATTERNS: [Pattern; K] = [ /* x86_64 patterns */ ];
+```
+
+Each architecture's prologue differs; do not share patterns across them.
+
+## 14. Rust porting checklist
+
+- [ ] Pull the new `libminecraftpe.so` and back it up.
+- [ ] For each hooked function: extract the new prologue pattern.
+- [ ] Prepend the new pattern to the relevant `PATTERNS` array.
+- [ ] For byte patches: re-verify `expected` bytes; update if changed.
+- [ ] For PLT hooks: confirm the imported symbol names are unchanged
+      (they rarely change, but verify).
+- [ ] `cargo ndk -t arm64-v8a build --release`.
+- [ ] Smoke-test on device with logcat.
+- [ ] Update the porting log with the new pattern + game version.
+
+## 15. Rust porting pitfalls
+
+- Replacing an old pattern instead of prepending → breaks users on
+  older game versions; always keep old patterns.
+- Putting the newest pattern last → every load scans stale patterns
+  first; put newest first.
+- Sharing one pattern across architectures → arm and aarch64 prologues
+  differ; use per-arch arrays.
+- Forgetting `#[cfg(target_arch = ...)]` → the build includes patterns
+  for the wrong architecture and they never match.
+- Not re-deriving byte-patch `expected` bytes → silent corruption on
+  the new version.
+
+

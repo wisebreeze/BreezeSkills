@@ -278,3 +278,167 @@ If you see `symbol not found` for an unexported function, switch from
 - Hooks installed but never fire → offset is stale (game updated); re-derive
   from the current `.so`.
 
+---
+
+# Part C — Rust build & deploy (mtbinloader2 patterns)
+
+Rust mods compile to a `cdylib` (a `.so`) via `cargo` + an Android NDK
+target. The reference is
+[mtbinloader2](https://github.com/mcbegamerxx954/mtbinloader2).
+
+## 16. Prerequisites
+
+- Rust toolchain (latest stable).
+- Android NDK r25+ installed; `ANDROID_NDK` env set, or the standalone
+  toolchain in `PATH`.
+- The Android target triple installed:
+  ```bash
+  rustup target add aarch64-linux-android
+  # optional: armv7-linux-androideabi, x86_64-linux-android
+  ```
+- A linker from the NDK. Easiest: install `cargo-ndk`:
+  ```bash
+  cargo install cargo-ndk
+  ```
+
+## 17. Cargo.toml
+
+```toml
+[package]
+name = "mymod"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+android_logger = { version = "0.15", default-features = false }
+bhook = "0.1"
+plt-rs = "0.4"
+region = "3"
+tinypatscan = "0.1"
+ctor = "0.4"
+libc = "0.2"
+log = "0.4"
+page_size = "0.6"
+once_cell = "1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+panic = "abort"      # unwinding through foreign frames is UB
+opt-level = "z"      # small binary
+lto = true
+codegen-units = 1
+strip = true
+
+[lints.clippy]
+indexing_slicing = "deny"
+unwrap_used = "deny"
+```
+
+`panic = "abort"` is mandatory: the `.so` is called from foreign (C++/JNI)
+frames, and unwinding across them is undefined behavior.
+
+## 18. build.rs (optional C/C++ interop)
+
+If the mod needs a small C/C++ stub (e.g. a `std::string` bridge, like
+mtbinloader2's `string.cpp`):
+
+```rust
+fn main() {
+    cc::Build::new()
+        .cpp(true)
+        .file("src/string.cpp")
+        .compile("stringstub");
+}
+```
+
+Add `cc = "1"` to `[build-dependencies]`.
+
+## 19. Build
+
+With `cargo-ndk`:
+
+```bash
+cargo ndk -t arm64-v8a build --release
+# output: target/aarch64-linux-android/release/libmymod.so
+```
+
+Without `cargo-ndk`, set the linker manually:
+
+```bash
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK/toolchains/llvm/prebuilt/<host>/bin/aarch64-linux-android24-clang"
+cargo build --release --target aarch64-linux-android
+```
+
+Verify the result is an AArch64 ELF:
+
+```bash
+file target/aarch64-linux-android/release/libmymod.so
+# expect: ELF 64-bit LSB shared object, ARM aarch64, stripped
+```
+
+## 20. 16KB page alignment (Android 15+)
+
+Add to `.cargo/config.toml` or pass via `RUSTFLAGS`:
+
+```toml
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+```
+
+Verify:
+
+```bash
+readelf -l libmymod.so | grep LOAD | head -1
+# expect: 0x4000 (16384)
+```
+
+## 21. Deploy
+
+Push the `.so` to the host app's lib dir (or bundle in the APK's
+`jniLibs/arm64-v8a/`):
+
+```bash
+adb push libmymod.so /data/app/<host-pkg>/lib/arm64/
+```
+
+For LeviLauncher-style hosts that scan a `mods/` dir, drop the `.so`
+there with a `manifest.json` (same manifest schema as the C++ preloader
+path; the launcher does not care about the source language).
+
+## 22. Verify with logcat
+
+```bash
+adb logcat -c
+adb logcat | rg -i 'mymod\|libminecraftpe'
+```
+
+Expected:
+
+```
+mymod: loaded
+mymod: libminecraftpe.so region: 0x... - 0x...
+mymod: pattern matched at 0x...
+mymod: hook installed
+```
+
+If you see `pattern not found`, the game version's pattern is missing
+from your `PATTERNS` array — add it (see `version-porting.md` Part C).
+
+## 23. Rust build issues
+
+- `error: linker 'aarch64-linux-android-clang' not found` → NDK not in
+  `PATH`, or target triple not added via `rustup target add`.
+- `undefined reference to __cxa_...` → C++ interop stub not compiled by
+  `build.rs`, or `cc` not in `[build-dependencies]`.
+- `.so` loads but `#[ctor::ctor]` never runs → built as `staticlib`
+  instead of `cdylib`; check `crate-type`.
+- Crash on first hook → `panic = "abort"` missing, or hook installed at
+  a non-executable address.
+- Binary too large → enable `lto`, `opt-level = "z"`, `strip = true`,
+  `codegen-units = 1`.
+- `mprotect` fails → not aligning to `page_size::get()` (16384 on
+  Android 15+).
+
+

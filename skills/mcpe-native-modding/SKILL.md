@@ -1,6 +1,6 @@
 ---
 name: mcpe-native-modding
-description: "Develop native mods and hooks for MCPE (Minecraft: Pocket Edition) Android arm64, supporting two interchangeable runtimes: the open-source BedrockTools methodology on LeviLauncher/preloader, and BreezeAPI (Dobby-based, with embedded QuickJS). Use when the user wants to: hook, patch, or mod libminecraftpe.so; write a native mod (.so) for either preloader or BreezeAPI; turn a desired feature into concrete game-function hooks; decide between inline hooks, vtable hooks, byte patches, and symbol/offset/address hooks; extract or verify ARM64 byte signatures; build an arm64-v8a Android .so with NDK + CMake; package a mod (manifest.json / .levipack or jniLibs); port a mod to a new MCPE version; or understand MCPE internals such as tick, render, FOV, packet, attack, screen, weather, time, skin, and UI hooks. Not for Java/Spigot/Forge mods or for non-MCPE ELF targets without adaptation."
+description: "Develop native mods and hooks for MCPE (Minecraft: Pocket Edition) Android arm64 in C++ (default) or Rust, supporting two interchangeable runtimes: the open-source BedrockTools methodology on LeviLauncher/preloader, and BreezeAPI (Dobby-based, with embedded QuickJS). Use when the user wants to: hook, patch, or mod libminecraftpe.so; write a native mod (.so) in C++ or Rust for either preloader or BreezeAPI; turn a desired feature into concrete game-function hooks; decide between inline hooks, vtable hooks, byte patches, and symbol/offset/address hooks; extract or verify ARM64 byte signatures; build an arm64-v8a Android .so with NDK + CMake (C++) or cargo + NDK target (Rust); package a mod (manifest.json / .levipack or jniLibs); port a mod to a new MCPE version; or understand MCPE internals such as tick, render, FOV, packet, attack, screen, weather, time, skin, and UI hooks. Not for Java/Spigot/Forge mods or for non-MCPE ELF targets without adaptation."
 ---
 
 # MCPE Native Modding
@@ -10,19 +10,28 @@ This skill teaches how to build native (`.so`) mods for **MCPE** on Android
 library that contains nearly all game logic (tick, render, network, UI,
 weather, time, skin, packets).
 
-This skill supports **two interchangeable runtimes**. Pick one based on the
-host launcher / SDK the user targets; the hooking methodology is shared, but
-the registration, addressing, and packaging differ.
+This skill supports **two interchangeable runtimes** and **two languages**.
+
+**Languages:** **C++ is the default.** Rust is supported as an alternative
+when the user asks for it, when the host toolchain is Rust-native, or when
+the mod wants zero-overhead panics (`panic = "abort"`) and a small binary.
+The Rust patterns are drawn from the open-source
+[mtbinloader2](https://github.com/mcbegamerxx954/mtbinloader2) project.
+
+**Runtimes** — pick one based on the host launcher / SDK the user targets;
+the hooking methodology is shared, but the registration, addressing, and
+packaging differ.
 
 | Runtime | Hook engine | Function addressing | Scripting | Packaging |
 |---|---|---|---|---|
 | **preloader** (LeviLauncher) | Gloss (inline / GOT / PLT / vtable) | byte signatures (function-head scan) | typed C++ events | `.levipack` into `mods/` |
 | **BreezeAPI** | Dobby (inline) | symbol name / library offset / absolute address | embedded QuickJS (ES2024) | `libbreeze_api.so` into `jniLibs/` |
 
-The preloader methodology follows the open-source
-[BedrockTools](https://github.com/RadiantByte/BedrockTools) project; see
-`NOTICE` for attribution. BreezeAPI is at
-[wisebreeze/BreezeAPI](https://github.com/wisebreeze/BreezeAPI) (Apache-2.0).
+Methodology sources (see `NOTICE` for attribution):
+
+- **C++ / preloader** — [BedrockTools](https://github.com/RadiantByte/BedrockTools)
+- **C++ / BreezeAPI** — [wisebreeze/BreezeAPI](https://github.com/wisebreeze/BreezeAPI) (Apache-2.0)
+- **Rust** — [mcbegamerxx954/mtbinloader2](https://github.com/mcbegamerxx954/mtbinloader2)
 
 Everything here is **machine-agnostic**: replace `<libminecraftpe.so>`,
 `<NDK>`, `<your-mod-dir>`, `<BreezeAPI-dir>` with real paths on your
@@ -144,7 +153,16 @@ A flat C ABI is also available (`breeze_init`, `breeze_hook_symbol`,
 
 Follow this order. Skipping steps is the most common cause of crashes.
 
-### Step 0 — Choose the runtime
+### Step 0 — Choose the language and the runtime
+
+**Language:**
+
+- **Default: C++.** Use unless the user asks for Rust.
+- **Rust** when the user asks for it, the host toolchain is Rust-native,
+  or the mod wants `panic = "abort"` and a small binary. Rust patterns
+  follow mtbinloader2 (bhook + plt-rs + tinypatscan + region + ctor).
+
+**Runtime:**
 
 - If the host is **LeviLauncher** → use **preloader** (signatures, Gloss,
   `.levipack`).
@@ -152,7 +170,7 @@ Follow this order. Skipping steps is the most common cause of crashes.
   → use **BreezeAPI** (symbol/offset/address hooks, Dobby, QuickJS).
 - If unsure, ask the user which launcher/SDK the mod targets.
 
-The remaining steps note where the two runtimes diverge.
+The remaining steps note where the runtimes and languages diverge.
 
 ### Step 1 — Name the game function behind the feature
 
@@ -312,6 +330,75 @@ auto r = api.EvalJS(R"(var rate = getTickRate(); "Tick rate: " + rate;)");
 // r.value == "Tick rate: 20"
 ```
 
+**Rust — inline hook via bhook (mtbinloader2 pattern):**
+
+```rust
+use bhook::hook_fn;
+use libc::c_void;
+
+// Locate the function by scanning .text with a byte pattern (tinypatscan),
+// then hook it. bhook's `hook_fn!` macro generates the trampoline; call
+// `call_original(...)` to invoke the saved original.
+hook_fn! {
+    fn game_tick(this: *mut c_void, dt: i32) -> *mut c_void = {
+        // custom logic before
+        let result = call_original(this, dt);
+        // custom logic after
+        result
+    }
+}
+
+// In your ctor entry, after resolving the address:
+//   bhook::hook(addr, game_tick::hook).expect("hook failed");
+// Self-disable when one-shot:
+//   game_tick::self_disable();
+```
+
+**Rust — PLT/GOT hook via plt-rs (mtbinloader2 pattern):**
+
+```rust
+use plt_rs::DynamicLibrary;
+use region::{protect, Protection};
+
+// Replace a GOT entry so calls to `fn_name` inside the target lib jump
+// to `replacement`. Used for intercepting library imports (e.g. fopen,
+// AAsset_open) without touching the caller's code.
+pub fn replace_plt<const LEN: usize>(
+    lib: &DynamicLibrary,
+    fns: [(&str, *const u8); LEN],
+) {
+    let base = lib.library().addr();
+    let table = get_function_table(lib).expect("no plt table");
+    for (name, replacement) in fns {
+        if let Some(entry) = table.get(name) {
+            let ptr = (base + entry.r_offset as usize) as *mut *const u8;
+            unsafe {
+                let _h = protect(ptr, std::mem::size_of::<usize>(),
+                                 Protection::READ_WRITE).expect("mprotect");
+                *ptr = replacement;
+                // _h drops -> page restored to RX
+            }
+        }
+    }
+}
+```
+
+**Rust — auto entry via ctor:**
+
+```rust
+#[ctor::ctor]
+fn init() {
+    android_logger::init_once(
+        android_logger::Config::default().with_min_level(log::Level::Info),
+    );
+    log::info!("mod loaded");
+    // wait for libminecraftpe.so, scan patterns, install hooks
+}
+```
+
+See `references/hook-techniques.md` Part C and `references/build-deploy.md`
+Part C for the full Rust reference.
+
 ### Step 7 — Build, package, deploy, verify
 
 See `references/build-deploy.md` for the full NDK + CMake commands for
@@ -348,27 +435,36 @@ preloader event bus when the host app prefers JS-driven configuration.
 ## 5. References (load on demand)
 
 - `references/feature-workflow.md` — feature → function → feasibility →
-  hook-decision guide with worked examples.
-- `references/hook-techniques.md` — full hook technique reference for
-  both runtimes: inline hooks, chains, head replacement, NOP/branch
-  patches, vtable, GOT/PLT, dlopen/EGL hooks, signature format rules,
-  and BreezeAPI symbol/offset/address hooks.
+  hook-decision guide with worked examples; includes the Step 0
+  language + runtime choice.
+- `references/hook-techniques.md` — full hook technique reference:
+  - Part A (preloader): inline hooks, chains, head replacement, NOP/branch
+    patches, vtable, GOT/PLT, dlopen/EGL hooks, signature format rules.
+  - Part B (BreezeAPI): HookBySymbol/Offset/Address, lifecycle, mprotect
+    byte patches, QuickJS integration.
+  - Part C (Rust): bhook inline hooks, plt-rs GOT hooks, tinypatscan
+    pattern scan, region mprotect, ctor auto-entry.
 - `references/so-analysis.md` — analyze the `.so` on disk without a device.
-- `references/build-deploy.md` — NDK+CMake build for both runtimes,
-  manifest, `.levipack` packaging, `jniLibs` integration, deployment,
-  logcat verification.
+- `references/build-deploy.md` — build & deploy for all paths:
+  - Part A (preloader): NDK+CMake, manifest, `.levipack`.
+  - Part B (BreezeAPI): NDK+CMake, `jniLibs` integration.
+  - Part C (Rust): cargo + NDK target, `cdylib`, 16KB page alignment.
 - `references/ida-workflow.md` — optional IDA / IDA Pro MCP guidance.
 - `references/version-porting.md` — porting checklist for new MCPE
-  versions (signatures for preloader, offsets for BreezeAPI).
+  versions:
+  - Part A (preloader): re-verify signatures.
+  - Part B (BreezeAPI): re-derive offsets.
+  - Part C (Rust): prepend new patterns to per-arch arrays.
 
 ## 6. Scripts
 
 - `scripts/verify_signatures.py` — scan a `.so` for all signatures parsed
-  from `Signatures.cpp`; report UNIQUE/AMBIGUOUS/MISSING (preloader).
+  from `Signatures.cpp`; report UNIQUE/AMBIGUOUS/MISSING (preloader; the
+  same pattern format is used by Rust's `tinypatscan`).
 - `scripts/elf_facts.py` — read-only ELF facts (header, segments, sections,
-  dynamic symbols, version strings) for a fresh `.so` (both runtimes).
+  dynamic symbols, version strings) for a fresh `.so` (all paths).
 - `scripts/aarch64_enc.py` — encode AArch64 patch instructions
-  (MOV/NOP/RET/BR/FMOV) for byte patches (both runtimes).
+  (MOV/NOP/RET/BR/FMOV) for byte patches (all paths).
 - `scripts/package_levipack.py` — package a mod into `.levipack`
   (manifest + `.so` + resources) and verify the result (preloader).
 
@@ -381,5 +477,7 @@ preloader event bus when the host app prefers JS-driven configuration.
   and personal use and respect the game's terms of service.
 - Always keep a backup of the original `.so`; fail safely on version
   mismatch.
+- **Default language is C++.** Use Rust only when the user asks for it
+  or the host toolchain is Rust-native.
 - When the user does not specify a runtime, ask which launcher/SDK the
   mod targets before writing code.

@@ -3,10 +3,19 @@
 The core thinking workflow. Use this **before** writing any code. Skipping
 this pipeline is the most common cause of broken mods.
 
-## Step 0 — Pick a runtime
+## Step 0 — Pick the language and the runtime
 
-Before the pipeline, decide which runtime the mod targets. This affects
-addressing, packaging, and the hook API.
+Before the pipeline, decide the **language** and the **runtime**. Both
+affect addressing, tooling, and packaging.
+
+**Language:**
+
+| If the user… | Use | Reference |
+|---|---|---|
+| Says nothing / wants C++ | **C++** (default) | BedrockTools / BreezeAPI |
+| Asks for Rust / wants small binary / `panic=abort` | **Rust** | mtbinloader2 |
+
+**Runtime:**
 
 | If the user targets… | Use runtime | Addressing | Packaging |
 |---|---|---|---|
@@ -14,9 +23,10 @@ addressing, packaging, and the hook API.
 | A host app bundling `libbreeze_api.so` / Dobby / QuickJS | BreezeAPI | symbol / offset / address | `jniLibs/` |
 | Wants runtime JS scripting of hook logic | BreezeAPI | offset (for stripped fns) | `jniLibs/` |
 | Wants typed events (FrameEvent, TickEvent…) | preloader | signatures | `.levipack` |
+| Rust + standalone `.so` loaded by `#[ctor::ctor]` | either (Rust) | tinypatscan patterns | `mods/` or `jniLibs/` |
 
-If the user does not specify, **ask** which launcher/SDK the mod targets
-before writing code.
+If the user does not specify either, **ask** which language and which
+launcher/SDK the mod targets before writing code.
 
 ## The pipeline
 

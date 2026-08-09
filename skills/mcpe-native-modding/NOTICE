@@ -1,30 +1,42 @@
 NOTICE
 
-This skill (mcpe-native-modding) teaches the methodology of the open-source
-BedrockTools project (https://github.com/RadiantByte/BedrockTools) for the
-preloader runtime, and documents the BreezeAPI runtime
-(https://github.com/wisebreeze/BreezeAPI) for Dobby-based hooking with
-embedded QuickJS scripting.
+This skill (mcpe-native-modding) teaches the methodology of several
+open-source projects, one per language/runtime combination:
 
-The hook/patch/signature/build patterns for the preloader runtime are
-derived from BedrockTools' code and documentation. This skill is licensed
-under the Apache License, Version 2.0 (see the repository root LICENSE).
+- **C++ / preloader runtime** — BedrockTools
+  (https://github.com/RadiantByte/BedrockTools)
+- **C++ / BreezeAPI runtime** — BreezeAPI
+  (https://github.com/wisebreeze/BreezeAPI), Apache-2.0
+- **Rust** — mtbinloader2
+  (https://github.com/mcbegamerxx954/mtbinloader2)
+
+The hook/patch/signature/build patterns for each path are derived from
+the corresponding project's code and documentation. This skill is
+licensed under the Apache License, Version 2.0 (see the repository root
+LICENSE).
 
 Referenced upstream projects:
 
-- BedrockTools (https://github.com/RadiantByte/BedrockTools) — methodology
-  source for the preloader runtime.
+- BedrockTools (https://github.com/RadiantByte/BedrockTools) — C++
+  methodology source for the preloader runtime.
 - preloader-android (https://github.com/LiteLDev/preloader-android) — the
   preloader SDK.
 - LeviLaunchroid (https://github.com/LiteLDev/LeviLaunchroid) — the
   launcher for the preloader runtime.
 - BreezeAPI (https://github.com/wisebreeze/BreezeAPI) — the Dobby-based
-  runtime with QuickJS.
+  C++ runtime with QuickJS.
 - Dobby (https://github.com/jmpews/Dobby) — inline hook engine used by
   BreezeAPI.
 - QuickJS (https://bellard.org/quickjs/) — JavaScript engine embedded in
   BreezeAPI.
+- mtbinloader2 (https://github.com/mcbegamerxx954/mtbinloader2) — Rust
+  methodology source (bhook, plt-rs, tinypatscan, region, ctor).
+- bhook (https://github.com/mcbegamerxx954/bhook) — Rust inline hook
+  crate used by mtbinloader2.
+- plt-rs, tinypatscan, region, ctor — Rust crates referenced by the
+  Rust path.
 
 Use responsibly: hook/patch only binaries you are authorized to modify,
 keep work to learning/personal use, and respect the game's terms of
 service.
+

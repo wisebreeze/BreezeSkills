@@ -405,3 +405,202 @@ JS globals are shared across all `EvalJS` calls; use them for state.
 - Letting JS hold references to native pointers across reloads → use
   integer handles, not raw pointers, in the JS API surface.
 
+---
+
+# Part C — Rust hooks (mtbinloader2 patterns)
+
+Rust mods follow the same methodology as C++ (locate → verify → hook →
+patch) but use the Rust crate ecosystem. The reference implementation is
+[mtbinloader2](https://github.com/mcbegamerxx954/mtbinloader2).
+
+## 19. Crate stack
+
+| Concern | Crate | Notes |
+|---|---|---|
+| Inline hooks | `bhook` | `hook_fn!` macro, `call_original`, `self_disable` |
+| Pattern scan | `tinypatscan` | SIMD-accelerated byte-pattern scan with `?` wildcards |
+| PLT/GOT hooks | `plt-rs` | parse ELF dynamic relocations, rewrite GOT entries |
+| Memory protection | `region` | `protect(ptr, len, RW)` → drop handle → restored to RX |
+| Auto entry | `ctor` | `#[ctor::ctor]` runs at `.so` load (no host callback needed) |
+| Logging | `android_logger` + `log` | `__android_log_print` bridge |
+| JNI (optional) | `jni` | read options from the host app |
+| ELF parsing | `scroll` | used by plt-rs internally |
+| Page size | `page_size` | query the device page size (4KB / 16KB) |
+
+## 20. Locating the game library
+
+Rust mods do not hook `dlopen`; they read `/proc/self/maps` to find the
+executable region of `libminecraftpe.so`:
+
+```rust
+fn find_lib_region(target_name: &str) -> Option<(usize, usize)> {
+    let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+    maps.lines()
+        .filter(|l| l.contains(target_name) && l.contains("r-xp"))
+        .filter_map(|l| {
+            let mut parts = l.splitn(3, ' ');
+            let range = parts.next()?;
+            let (start, end) = range.split_once('-')?;
+            Some((usize::from_str_radix(start, 16).ok()?,
+                  usize::from_str_radix(end, 16).ok()?))
+        })
+        .next()
+}
+```
+
+This gives the `(start, end)` of the `.text`-equivalent region to scan.
+
+## 21. Pattern scan with tinypatscan
+
+```rust
+use tinypatscan::Pattern;
+
+// One pattern per known game version; try each until one matches.
+#[cfg(target_arch = "aarch64")]
+const PATTERNS: [Pattern; 2] = [
+    Pattern::from_str("FF ?? 02 D1 FD 7B ?? A9 ?? ?? ?? ?? FA 67 ?? A9 ..."),
+    Pattern::from_str("FF 83 02 D1 FD 7B 06 A9 FD 83 01 91 ..."),
+];
+
+fn resolve(lib_start: usize, lib_end: usize) -> Option<usize> {
+    let text = unsafe {
+        std::slice::from_raw_parts(lib_start as *const u8, lib_end - lib_start)
+    };
+    for pat in &PATTERNS {
+        if let Some(off) = pat.find(text) {
+            return Some(lib_start + off);
+        }
+    }
+    None
+}
+```
+
+`Pattern::from_str` accepts `??` or `?` as a single-byte wildcard, same
+semantics as the C++ signature format. Keep a per-version array; the
+first match wins.
+
+## 22. Inline hook with bhook
+
+```rust
+use bhook::hook_fn;
+use libc::c_void;
+
+hook_fn! {
+    fn game_tick(this: *mut c_void, dt: i32) -> *mut c_void = {
+        log::info!("tick dt={dt}");
+        let r = call_original(this, dt);
+        r
+    }
+}
+
+// install:
+//   let addr = resolve(start, end).expect("pattern not found");
+//   bhook::hook(addr, game_tick::hook).expect("hook install failed");
+//
+// one-shot (auto-disable after first hit):
+//   game_tick::self_disable();
+```
+
+`hook_fn!` generates a trampoline and a `call_original` shim. The macro
+expands to a struct with `.hook` (the detour entry) and `self_disable()`
+for one-shot hooks.
+
+## 23. PLT/GOT hook with plt-rs
+
+For intercepting library imports (e.g. `fopen`, `AAsset_open`) without
+patching the caller:
+
+```rust
+use plt_rs::DynamicLibrary;
+use region::{protect, Protection};
+
+pub fn replace_plt<const LEN: usize>(
+    lib: &DynamicLibrary,
+    fns: [(&str, *const u8); LEN],
+) {
+    let base = lib.library().addr();
+    let table = get_function_table(lib).expect("no plt table");
+    for (name, replacement) in fns {
+        if let Some(entry) = table.get(name) {
+            let ptr = (base + entry.r_offset as usize) as *mut *const u8;
+            unsafe {
+                let _h = protect(ptr, std::mem::size_of::<usize>(),
+                                 Protection::READ_WRITE).expect("mprotect");
+                *ptr = replacement;
+                // _h drops on scope exit -> page restored to RX
+            }
+        }
+    }
+}
+```
+
+`get_function_table` walks the ELF `.rela.dyn` / `.rela.plt` sections and
+maps symbol names to their relocation entries (see mtbinloader2's
+`plthook.rs`).
+
+## 24. Byte patches in Rust
+
+Same safe-patch logic as C++; use `region` for mprotect and
+`std::ptr::copy_nonoverlapping` for the write:
+
+```rust
+use region::{protect, Protection};
+
+fn safe_patch(addr: usize, expected: &[u8], replacement: &[u8]) {
+    let page_size = page_size::get();
+    let page = addr & !(page_size - 1);
+    unsafe {
+        let cur = std::slice::from_raw_parts(addr as *const u8, expected.len());
+        if cur == replacement { return; }              // already patched
+        if cur != expected  { log::warn!("version mismatch"); return; }
+        let _h = protect(addr as *mut u8, expected.len(),
+                         Protection::READ_WRITE).expect("mprotect");
+        std::ptr::copy_nonoverlapping(
+            replacement.as_ptr(), addr as *mut u8, replacement.len());
+        // flush icache on aarch64
+        std::arch::asm!("dc cvau, {0}", in(reg) addr, options(nostack));
+        std::arch::asm!("dsb ish; ic ivau, {0}", in(reg) addr, options(nostack));
+        // _h drops -> RX restored
+    }
+}
+```
+
+Always query `page_size::get()`; on Android 15+ it may be 16384.
+
+## 25. Auto entry with ctor
+
+Rust mods do not need a host callback. `#[ctor::ctor]` runs at `.so` load
+time, before any exported function is called:
+
+```rust
+#[ctor::ctor]
+fn init() {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_min_level(log::Level::Info)
+            .with_tag("mymod"),
+    );
+    log::info!("loaded");
+    // wait for libminecraftpe.so, scan, hook
+}
+```
+
+Pair with `panic = "abort"` in `Cargo.toml` so an unexpected panic
+terminates the process instead of unwinding through foreign frames.
+
+## 26. Rust pitfalls
+
+- Forgetting `panic = "abort"` → unwinding through C++/JNI frames is UB.
+- Using `unwrap()` / indexing in hot paths → mtbinloader2 denies these
+  via `clippy::unwrap_used` and `clippy::indexing_slicing`; do the same.
+- Scanning the wrong memory region → confirm `r-xp` in `/proc/self/maps`,
+  not `r--p` (read-only data).
+- Stale pattern array after a game update → add the new version's
+  pattern; keep old ones for backward compatibility.
+- Not flushing the icache after a byte patch on aarch64 → stale
+  instructions executed.
+- Holding a `region` guard across an unwind → page left writable.
+- `bhook` hook installed at an address inside a non-executable region →
+  crash on first call.
+
+
